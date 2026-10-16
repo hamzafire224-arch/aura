@@ -1,0 +1,71 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* Void Black #09090b */
+    --background: 240 10% 4%;
+    --foreground: 0 0% 98%;
+
+    /* Darker Card #0d0d12 */
+    --card: 240 10% 6%;
+    --card-foreground: 0 0% 98%;
+
+    --popover: 240 10% 6%;
+    --popover-foreground: 0 0% 98%;
+
+    /* Neon Cyan #00f3ff */
+    --primary: 183 100% 50%;
+    --primary-foreground: 240 10% 4%;
+
+    /* Secondary Purple/Blue #4f46e5 */
+    --secondary: 240 100% 60%;
+    --secondary-foreground: 0 0% 100%;
+
+    --muted: 240 10% 12%;
+    --muted-foreground: 240 5% 64.9%;
+
+    --accent: 183 100% 50%;
+    --accent-foreground: 240 10% 4%;
+
+    /* Crimson #ff003c */
+    --destructive: 346 100% 50%;
+    --destructive-foreground: 0 0% 98%;
+
+    --border: 240 10% 12%;
+    --input: 240 10% 12%;
+    --ring: 183 100% 50%;
+
+    --radius: 0.5rem;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+  }
+
+  /* Custom Scrollbar */
+  ::-webkit-scrollbar {
+    width: 10px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: hsl(var(--background));
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: hsl(var(--muted));
+    border-radius: 5px;
+    border: 2px solid hsl(var(--background));
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: hsl(var(--primary));
+  }
+}

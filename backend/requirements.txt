@@ -1,0 +1,20 @@
+fastapi
+uvicorn[standard]
+python-dotenv
+pydantic
+# Core AI Stack
+crewai
+crewai-tools
+langgraph
+langchain>=0.3.0
+langchain-core>=0.3.0
+langchain-community
+langchain-openai
+langchain-groq
+langchain-google-genai
+beautifulsoup4
+tavily-python
+# Utilities
+pandas
+pytrends
+requests
