@@ -89,9 +89,20 @@ export default function ContentStudioPage() {
             return
         }
 
+        // Verify active Supabase auth session
+        const { data: { session }, error: sessionError } = await supabase.auth.getSession()
+        if (sessionError || !session?.access_token) {
+            toast.error("Authentication required", {
+                description: "Please log in to execute AI agent directives."
+            })
+            return
+        }
+
         setIsGenerating(true)
+        setGeneratedOutput("") // Reset output terminal for incoming token stream
+
         toast.info("Deploying Content Creator Agent...", {
-            description: "Executing multi-pass copywriting engine via agent-gateway."
+            description: "Executing real-time streaming engine via agent-gateway."
         })
 
         const structuredPrompt = `Act as an elite direct-response copywriter and Conversion Rate Optimization (CRO) expert.
@@ -110,58 +121,145 @@ Execution Instructions:
 
 Format your entire output in clean, readable Markdown with bold headers and bullet points.`
 
+        const supabaseUrl = import.meta.env.VITE_SUPABASE_URL
+        const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY
+
         try {
-            const { data: edgeData, error: edgeError } = await supabase.functions.invoke("agent-gateway", {
-                body: {
+            const response = await fetch(`${supabaseUrl}/functions/v1/agent-gateway`, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    "Authorization": `Bearer ${session.access_token}`,
+                    "apikey": supabaseAnonKey,
+                },
+                body: JSON.stringify({
                     businessId: activeBusiness.id,
                     agentType: "content_creator",
                     intent: "generate_copy",
                     prompt: structuredPrompt,
                     creditsCost: 1,
-                }
+                    stream: true,
+                }),
             })
 
-            if (edgeError) {
-                console.error("Content generation error:", edgeError)
-                const errorMsg = edgeError.message || ""
-                const isInsufficientCredits = 
-                    errorMsg.includes("402") || 
-                    errorMsg.toLowerCase().includes("insufficient") ||
-                    (edgeError as any)?.context?.status === 402 ||
-                    (edgeError as any)?.status === 402
+            // Strict error verification before reading SSE stream
+            if (!response.ok) {
+                let errorData: any = {}
+                try {
+                    errorData = await response.json()
+                } catch {
+                    errorData = { error: response.statusText }
+                }
 
-                if (isInsufficientCredits) {
+                // 402 Payment Required / Insufficient Credits Handling
+                if (response.status === 402 || errorData.code === "INSUFFICIENT_CREDITS") {
                     toast.error("Insufficient Credits (402)", {
-                        description: "You need at least 1 credit to generate copy. Please top up your treasury balance."
+                        description: errorData.error || "You need at least 1 credit to generate copy. Please top up your treasury balance."
                     })
+                    setGeneratedOutput(null)
+                    return
+                }
+
+                if (response.status === 401) {
+                    toast.error("Unauthorized (401)", {
+                        description: "Your session has expired. Please log in again."
+                    })
+                    setGeneratedOutput(null)
                     return
                 }
 
                 toast.error("Generation Failed", {
-                    description: errorMsg || "Agent gateway encountered an unexpected inference error."
+                    description: errorData.error || `Agent gateway returned status ${response.status}.`
                 })
+                setGeneratedOutput(null)
                 return
             }
 
-            const outputText = edgeData?.output || edgeData?.result || "Copy generation completed successfully."
-            setGeneratedOutput(outputText)
-            
-            // Add to session drafts
-            const newDraft: GeneratedCopyDraft = {
-                id: crypto.randomUUID(),
-                productName: productName.trim(),
-                contentType: selectedTypeObj.label,
-                output: outputText,
-                timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+            if (!response.body) {
+                throw new Error("No response stream received from agent gateway.")
             }
-            setDraftHistory((prev) => [newDraft, ...prev])
 
-            toast.success("Copy Generated Successfully!", {
-                description: "1 credit settled via atomic ledger."
-            })
+            // Real-Time SSE Stream Reader
+            const reader = response.body.getReader()
+            const decoder = new TextDecoder()
+            let accumulatedText = ""
+            let buffer = ""
+
+            while (true) {
+                const { done, value } = await reader.read()
+                if (done) break
+
+                buffer += decoder.decode(value, { stream: true })
+                const lines = buffer.split("\n")
+                buffer = lines.pop() ?? ""
+
+                for (const line of lines) {
+                    const trimmed = line.trim()
+                    if (!trimmed || trimmed.startsWith(":")) continue
+
+                    if (trimmed === "data: [DONE]") {
+                        continue
+                    }
+
+                    if (trimmed.startsWith("data: ")) {
+                        const dataContent = trimmed.slice(6)
+                        try {
+                            const parsed = JSON.parse(dataContent)
+                            if (parsed.error) {
+                                toast.error("Stream Error", { description: parsed.error })
+                                continue
+                            }
+                            const token = parsed.token ?? parsed.text ?? parsed.choices?.[0]?.delta?.content
+                            if (token) {
+                                accumulatedText += token
+                                setGeneratedOutput(accumulatedText)
+                            }
+                        } catch {
+                            // If stream line is raw text rather than JSON
+                            accumulatedText += dataContent
+                            setGeneratedOutput(accumulatedText)
+                        }
+                    }
+                }
+            }
+
+            // Flush remaining buffer content if present
+            if (buffer.trim().startsWith("data: ")) {
+                const trimmed = buffer.trim()
+                if (trimmed !== "data: [DONE]") {
+                    const dataContent = trimmed.slice(6)
+                    try {
+                        const parsed = JSON.parse(dataContent)
+                        const token = parsed.token ?? parsed.text ?? parsed.choices?.[0]?.delta?.content
+                        if (token) {
+                            accumulatedText += token
+                            setGeneratedOutput(accumulatedText)
+                        }
+                    } catch {
+                        accumulatedText += dataContent
+                        setGeneratedOutput(accumulatedText)
+                    }
+                }
+            }
+
+            // Add completed output to session draft history
+            if (accumulatedText.trim()) {
+                const newDraft: GeneratedCopyDraft = {
+                    id: crypto.randomUUID(),
+                    productName: productName.trim(),
+                    contentType: selectedTypeObj.label,
+                    output: accumulatedText,
+                    timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+                }
+                setDraftHistory((prev) => [newDraft, ...prev])
+
+                toast.success("Copy Generated Successfully!", {
+                    description: "1 credit settled via atomic ledger."
+                })
+            }
 
         } catch (err: any) {
-            console.error("Fatal error invoking agent-gateway:", err)
+            console.error("Fatal error during stream ingestion:", err)
             toast.error("Inference Error: " + (err.message || "Unknown error"))
         } finally {
             setIsGenerating(false)
@@ -215,7 +313,7 @@ Format your entire output in clean, readable Markdown with bold headers and bull
                             AI Copywriter Studio
                         </h1>
                         <p className="text-zinc-400 text-sm mt-1">
-                            Deploy autonomous direct-response copywriters to engineer high-converting ads, descriptions, and sales scripts.
+                            Deploy autonomous direct-response copywriters to engineer high-converting ads, descriptions, and sales scripts with zero-latency streaming.
                         </p>
                     </div>
 
@@ -338,7 +436,7 @@ Format your entire output in clean, readable Markdown with bold headers and bull
                                         {isGenerating ? (
                                             <>
                                                 <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                                                Synthesizing Copy via Gateway...
+                                                Streaming Live Copy...
                                             </>
                                         ) : (
                                             <>
@@ -391,7 +489,11 @@ Format your entire output in clean, readable Markdown with bold headers and bull
                                         Agent Output Terminal
                                     </CardTitle>
                                     <CardDescription className="text-xs font-mono text-zinc-400 mt-0.5">
-                                        {generatedOutput ? "Synthesized copy ready for deployment" : "Awaiting directive dispatch"}
+                                        {isGenerating
+                                            ? "Streaming live tokens via agent-gateway..."
+                                            : generatedOutput
+                                            ? "Synthesized copy ready for deployment"
+                                            : "Awaiting directive dispatch"}
                                     </CardDescription>
                                 </div>
 
@@ -429,7 +531,7 @@ Format your entire output in clean, readable Markdown with bold headers and bull
 
                             <CardContent className="flex-1 p-6 flex flex-col justify-center">
                                 <AnimatePresence mode="wait">
-                                    {isGenerating ? (
+                                    {isGenerating && !generatedOutput ? (
                                         <motion.div
                                             key="loading"
                                             initial={{ opacity: 0 }}
@@ -444,11 +546,11 @@ Format your entire output in clean, readable Markdown with bold headers and bull
                                             <div className="space-y-1">
                                                 <p className="text-sm font-semibold text-white">Synthesizing Persuasion Architecture</p>
                                                 <p className="text-xs text-zinc-500 font-mono">
-                                                    Formulating hooks, body copy, and conversion triggers via agent-gateway...
+                                                    Connecting to neural gateway and establishing SSE stream...
                                                 </p>
                                             </div>
                                         </motion.div>
-                                    ) : generatedOutput ? (
+                                    ) : generatedOutput !== null && generatedOutput !== undefined ? (
                                         <motion.div
                                             key="output"
                                             initial={{ opacity: 0, y: 10 }}
@@ -457,6 +559,9 @@ Format your entire output in clean, readable Markdown with bold headers and bull
                                         >
                                             <div className="p-5 rounded-xl bg-black/40 border border-white/5 text-zinc-200 font-mono text-xs whitespace-pre-wrap leading-relaxed overflow-y-auto max-h-[620px] select-text">
                                                 {generatedOutput}
+                                                {isGenerating && (
+                                                    <span className="inline-block w-2 h-4 bg-cyan-400 ml-1 animate-pulse align-middle" />
+                                                )}
                                             </div>
                                         </motion.div>
                                     ) : (
@@ -472,7 +577,7 @@ Format your entire output in clean, readable Markdown with bold headers and bull
                                             <div className="space-y-1 max-w-sm mx-auto">
                                                 <h3 className="text-base font-semibold text-zinc-300">Studio Idle</h3>
                                                 <p className="text-xs text-zinc-500 leading-relaxed">
-                                                    Enter your product details on the left and dispatch the directive. Your AI copy will be synthesized and rendered here in real-time.
+                                                    Enter your product details on the left and dispatch the directive. Your AI copy will be synthesized and streamed here in real-time.
                                                 </p>
                                             </div>
                                         </motion.div>
